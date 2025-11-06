@@ -19,13 +19,75 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 temp_setup = os.path.join(current_dir, "password_py.py")
 
 
+class IconManager:
+    """图标管理器，用于加载和管理应用程序图标"""
+
+    def __init__(self, icon_path):
+        self.icon_path = icon_path
+        self.icons = {}
+        self.load_icons()
+
+    def load_icons(self):
+        """加载图标"""
+        icon_files = {
+            "settings": "settings.svg",
+            "folder": "folder-heart.svg",
+            "run": "play-circle.svg",
+            "clear": "delete_all.svg",
+            "delete": "delete.svg",
+            "stop": "stop-circle.svg",
+            "folder_item": "folder_special-copy.svg",
+            "python_file": "file-code.svg",
+            "main": "edit.svg"
+        }
+
+        # 尝试加载自定义图标
+        for key, filename in icon_files.items():
+            try:
+                icon_path = self.icon_path / filename
+                if icon_path.exists():
+                    self.icons[key] = QIcon(str(icon_path))
+                else:
+                    self.icons[key] = self._get_default_icon(key)
+            except Exception:
+                self.icons[key] = self._get_default_icon(key)
+
+    def _get_default_icon(self, icon_type):
+        """获取默认系统图标"""
+        icon_map = {
+            "settings": QStyle.StandardPixmap.SP_ComputerIcon,
+            "folder": QStyle.StandardPixmap.SP_DirIcon,
+            "run": QStyle.StandardPixmap.SP_MediaPlay,
+            "clear": QStyle.StandardPixmap.SP_DialogResetButton,
+            "delete": QStyle.StandardPixmap.SP_TrashIcon,
+            "stop": QStyle.StandardPixmap.SP_MediaStop,
+            "folder_item": QStyle.StandardPixmap.SP_DirIcon,
+            "python_file": QStyle.StandardPixmap.SP_FileIcon,
+            "main": QStyle.StandardPixmap.SP_FileIcon
+        }
+        # 创建一个临时的应用程序实例来获取样式
+        app = QApplication.instance()
+        if app:
+            return app.style().standardIcon(icon_map.get(icon_type, QStyle.StandardPixmap.SP_FileIcon))
+        else:
+            return QIcon()
+
+    def get_icon(self, icon_name):
+        """获取指定名称的图标"""
+        return self.icons.get(icon_name, QIcon())
+
+    def get_main_icon(self):
+        """获取主应用程序图标"""
+        return self.icons.get("main", QIcon())
+
+
 class EncryptThread(QThread):
     """加密线程，用于后台执行加密任务并发送日志信息"""
     log_signal = pyqtSignal(str, str)  # 日志内容，日志级别(INFO/WARNING/ERROR)
     progress_signal = pyqtSignal(int, int)  # 当前进度，总任务数
     finished_signal = pyqtSignal(bool)  # 完成信号，是否成功
 
-    def __init__(self, python_path, file_paths, output_dir=current_dir,rename_enabled = True):
+    def __init__(self, python_path, file_paths, output_dir=current_dir, rename_enabled=True):
         super().__init__()
         self.python_path = python_path
         self.file_paths = file_paths
@@ -135,7 +197,6 @@ class EncryptThread(QThread):
 
 
 class PythonPathDialog(QDialog):
-    """Python路径配置对话框"""
 
     def __init__(self, current_paths, parent=None):
         super().__init__(parent)
@@ -143,8 +204,56 @@ class PythonPathDialog(QDialog):
         self.resize(600, 400)
         self.setMinimumSize(500, 300)
 
+        # 设置对话框图标
+        if parent and hasattr(parent, 'icon_manager'):
+            self.setWindowIcon(parent.icon_manager.get_icon("settings"))
+
         self.paths = current_paths.copy()
+        self.original_paths = current_paths.copy()  # 保存原始路径列表
         self.init_ui()
+
+    def add_path(self):
+        """添加Python路径"""
+        filter_str = "可执行文件 (*.exe);;所有文件 (*)" if platform.system() == "Windows" else "可执行文件 (*);;所有文件 (*)"
+        path, _ = QFileDialog.getOpenFileName(self, "选择Python解释器", "", filter_str)
+        if path:
+            if path not in self.paths:
+                self.paths.append(path)
+                self.refresh_table()
+            else:
+                QMessageBox.information(self, "提示", "该路径已存在")
+
+    def remove_path(self):
+        """删除选中的Python路径"""
+        current_row = self.table.currentRow()
+        if 0 <= current_row < len(self.paths):
+            reply = QMessageBox.question(self, "确认删除",
+                                         f"确定要删除Python路径:\n{self.paths[current_row]}吗？")
+            if reply == QMessageBox.StandardButton.Yes:
+                del self.paths[current_row]
+                self.refresh_table()
+
+    def accept(self):
+        """重写accept方法，在点击确定时检查是否有更改"""
+        super().accept()
+
+    def closeEvent(self, event):
+        """处理关闭事件，检查是否有未保存的更改"""
+        if self.paths != self.original_paths:
+            reply = QMessageBox.question(self, "确认关闭",
+                                         "您有未保存的更改，是否保存后再关闭？",
+                                         QMessageBox.StandardButton.Yes |
+                                         QMessageBox.StandardButton.No |
+                                         QMessageBox.StandardButton.Cancel)
+            if reply == QMessageBox.StandardButton.Yes:
+                self.accept()  # 保存并关闭
+                event.accept()
+            elif reply == QMessageBox.StandardButton.No:
+                event.accept()  # 直接关闭
+            else:
+                event.ignore()  # 取消关闭
+        else:
+            event.accept()
 
     def init_ui(self):
         layout = QVBoxLayout()
@@ -207,12 +316,61 @@ class PythonPathDialog(QDialog):
             self.table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
             self.table.setItem(i, 1, QTableWidgetItem(path))
 
-            # 检查路径是否可用
-            is_valid = os.path.exists(path) and os.access(path, os.X_OK)
-            status_text = "可用" if is_valid else "不可用"
+            # 检查路径状态，包括Cython安装情况
+            status_text, is_valid = self.get_python_path_status(path)
             status_item = QTableWidgetItem(status_text)
-            status_item.setForeground(QColor("green") if is_valid else QColor("red"))
+            if is_valid:
+                status_item.setForeground(QColor("green"))
+            else:
+                status_item.setForeground(QColor("red"))
             self.table.setItem(i, 2, status_item)
+
+    def get_python_path_status(self, path):
+        """获取Python路径的状态信息"""
+        try:
+            # 检查文件是否存在
+            if not os.path.exists(path):
+                return "不存在", False
+
+            # 检查是否具有执行权限
+            if not os.access(path, os.X_OK):
+                return "无执行权限", False
+
+            # 尝试执行Python命令验证是否为有效的Python解释器
+            version_result = subprocess.run(
+                [path, "-c", "import sys; print('Python version:', sys.version)"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+
+            # 如果Python命令执行失败
+            if version_result.returncode != 0:
+                return "Python无效", False
+
+            # 检查Cython是否安装
+            cython_result = subprocess.run(
+                [path, "-c", "import Cython"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            # 根据Cython安装情况返回状态
+            if cython_result.returncode == 0:
+                return "可用", True
+            else:
+                return "未安装Cython", False
+
+        except subprocess.TimeoutExpired:
+            return "超时", False
+        except Exception:
+            return "错误", False
+
+    def test_python_path(self, path):
+        """测试Python路径是否有效（用于兼容旧接口）"""
+        _, is_valid = self.get_python_path_status(path)
+        return is_valid
 
     def add_path(self):
         """添加Python路径"""
@@ -251,14 +409,50 @@ class PythonPathDialog(QDialog):
         if 0 <= current_row < len(self.paths):
             path = self.paths[current_row]
             try:
-                result = subprocess.run([path, "--version"],
-                                        capture_output=True, text=True, timeout=5)
-                if result.returncode == 0:
-                    QMessageBox.information(self, "测试成功",
-                                            f"Python路径有效:\n{path}\n\n版本信息:\n{result.stdout}")
+                # 获取详细的状态信息
+                status_text, is_valid = self.get_python_path_status(path)
+
+                if is_valid:
+                    # 获取Python版本信息
+                    version_result = subprocess.run([path, "--version"],
+                                                    capture_output=True, text=True, timeout=5)
+                    version_info = version_result.stdout.strip() if version_result.returncode == 0 else "无法获取版本信息"
+
+                    # 获取Cython版本信息
+                    cython_result = subprocess.run(
+                        [path, "-c", "import Cython; print('Cython installed:', Cython.__version__)"],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    cython_info = cython_result.stdout.strip() if cython_result.returncode == 0 else "无法获取Cython信息"
+
+                    QMessageBox.information(
+                        self, "测试成功",
+                        f"Python路径有效:\n{path}\n\n{version_info}\n{cython_info}"
+                    )
                 else:
-                    QMessageBox.warning(self, "测试失败",
-                                        f"Python路径无效:\n{path}\n\n错误信息:\n{result.stderr}")
+                    if status_text == "不存在":
+                        QMessageBox.warning(self, "测试失败", f"Python路径不存在:\n{path}")
+                    elif status_text == "无执行权限":
+                        QMessageBox.warning(self, "测试失败", f"Python路径无执行权限:\n{path}")
+                    elif status_text == "Python无效":
+                        QMessageBox.warning(self, "测试失败", f"不是有效的Python解释器:\n{path}")
+                    elif status_text == "未安装Cython":
+                        version_result = subprocess.run([path, "--version"],
+                                                        capture_output=True, text=True, timeout=5)
+                        version_info = version_result.stdout.strip() if version_result.returncode == 0 else "无法获取版本信息"
+
+                        QMessageBox.warning(
+                            self, "Cython未安装",
+                            f"Python路径有效但未安装Cython:\n{path}\n\n{version_info}\n\n"
+                            f"请安装Cython以使用此工具:\npip install Cython"
+                        )
+                    elif status_text == "超时":
+                        QMessageBox.critical(self, "测试错误", f"测试超时:\n{path}\n\n请检查Python解释器是否响应正常")
+                    else:
+                        QMessageBox.critical(self, "测试错误", f"测试过程中发生错误:\n{path}")
+
+            except subprocess.TimeoutExpired:
+                QMessageBox.critical(self, "测试错误", f"测试超时:\n{path}\n\n请检查Python解释器是否响应正常")
             except Exception as e:
                 QMessageBox.critical(self, "测试错误", f"测试过程中发生错误:\n{str(e)}")
 
@@ -774,51 +968,15 @@ class PythonPackager(QMainWindow):
         self.output_dir = current_dir
         self.last_selected_index = 0
         self.encrypt_thread = None
-        self.open_folder_after_completion = False  # 新增属性
+        self.open_folder_after_completion = False
         self.icon_path = Path(current_dir) / "resources" / "icons"
-        self.icons = {}
 
-        self.load_icons()
+        # 使用图标管理器
+        self.icon_manager = IconManager(self.icon_path)
+        self.setWindowIcon(self.icon_manager.get_main_icon())
+
         self.init_ui()
         self.load_config()
-
-    def load_icons(self):
-        """加载图标"""
-        icon_files = {
-            "settings": "settings.svg",
-            "folder": "folder-heart.svg",
-            "run": "play-circle.svg",
-            "clear": "delete_all.svg",
-            "delete": "delete.svg",
-            "stop": "stop-circle.svg",
-            "folder_item": "folder_special-copy.svg",
-            "python_file": "file-code.svg",
-        }
-
-        # 尝试加载自定义图标
-        for key, filename in icon_files.items():
-            try:
-                icon_path = self.icon_path / filename
-                if icon_path.exists():
-                    self.icons[key] = QIcon(str(icon_path))
-                else:
-                    self.icons[key] = self._get_default_icon(key)
-            except Exception:
-                self.icons[key] = self._get_default_icon(key)
-
-    def _get_default_icon(self, icon_type):
-        """获取默认系统图标"""
-        icon_map = {
-            "settings": QStyle.StandardPixmap.SP_ComputerIcon,
-            "folder": QStyle.StandardPixmap.SP_DirIcon,
-            "run": QStyle.StandardPixmap.SP_MediaPlay,
-            "clear": QStyle.StandardPixmap.SP_DialogResetButton,
-            "delete": QStyle.StandardPixmap.SP_TrashIcon,
-            "stop": QStyle.StandardPixmap.SP_MediaStop,
-            "folder_item": QStyle.StandardPixmap.SP_DirIcon,
-            "python_file": QStyle.StandardPixmap.SP_FileIcon,
-        }
-        return self.style().standardIcon(icon_map.get(icon_type, QStyle.StandardPixmap.SP_FileIcon))
 
     def init_ui(self):
         """初始化界面"""
@@ -877,7 +1035,7 @@ class PythonPackager(QMainWindow):
         toolbar.addWidget(self.python_combo)
 
         # 设置Python路径按钮
-        settings_action = QAction(self.icons["settings"], "设置Python路径", self)
+        settings_action = QAction(self.icon_manager.get_icon("settings"), "设置Python路径", self)
         settings_action.triggered.connect(self.show_python_path_dialog)
         settings_action.setToolTip("配置Python解释器路径")
         toolbar.addAction(settings_action)
@@ -885,7 +1043,7 @@ class PythonPackager(QMainWindow):
         toolbar.addSeparator()
 
         # 浏览文件夹按钮
-        browse_action = QAction(self.icons["folder"], "添加文件夹", self)
+        browse_action = QAction(self.icon_manager.get_icon("folder"), "添加文件夹", self)
         browse_action.triggered.connect(self.browse_folder)
         browse_action.setToolTip("添加包含Python文件的文件夹")
         toolbar.addAction(browse_action)
@@ -893,13 +1051,13 @@ class PythonPackager(QMainWindow):
         toolbar.addSeparator()
 
         # 批量执行按钮
-        execute_action = QAction(self.icons["run"], "批量加密", self)
+        execute_action = QAction(self.icon_manager.get_icon("run"), "批量加密", self)
         execute_action.triggered.connect(self.batch_encrypt)
         execute_action.setToolTip("加密所有选中的Python文件")
         toolbar.addAction(execute_action)
 
         # 停止任务按钮
-        self.stop_action = QAction(self.icons["stop"], "停止任务", self)
+        self.stop_action = QAction(self.icon_manager.get_icon("stop"), "停止任务", self)
         self.stop_action.triggered.connect(self.stop_current_task)
         self.stop_action.setEnabled(False)
         self.stop_action.setToolTip("停止当前加密任务")
@@ -908,13 +1066,13 @@ class PythonPackager(QMainWindow):
         toolbar.addSeparator()
 
         # 清除日志按钮
-        clear_log_action = QAction(self.icons["clear"], "清除当前日志", self)
-        clear_log_action.triggered.connect(self.clear_current_log)
+        clear_log_action = QAction(self.icon_manager.get_icon("clear"), "清除当前日志", self)
+        clear_log_action.triggered.connect(lambda: self.clear_current_log())
         clear_log_action.setToolTip("清除当前标签页的日志")
         toolbar.addAction(clear_log_action)
 
         # 添加新按钮：删除所有非主日志标签页
-        remove_extra_tabs_action = QAction(self.icons["delete"], "删除额外日志页", self)
+        remove_extra_tabs_action = QAction(self.icon_manager.get_icon("delete"), "删除额外日志页", self)
         remove_extra_tabs_action.triggered.connect(self.remove_extra_log_tabs)
         remove_extra_tabs_action.setToolTip("删除所有非主日志的标签页")
         toolbar.addAction(remove_extra_tabs_action)
@@ -1019,28 +1177,6 @@ class PythonPackager(QMainWindow):
         self.update_task_status(False)
         self.update_output_path_display()
 
-        # 默认输出路径按钮
-        self.default_output_btn = QPushButton("默认输出路径")
-        self.default_output_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f0f0f0;
-                border: 1px solid #ccc;
-                border-radius: 3px;
-                padding: 2px 5px;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                background-color: #e0e0e0;
-            }
-        """)
-        self.default_output_btn.clicked.connect(self.set_default_output_path)
-        self.default_output_btn.setToolTip("点击设置为默认输出路径（与源文件同目录）")
-        self.status_bar.addPermanentWidget(self.default_output_btn)
-
-        # 初始状态
-        self.update_task_status(False)
-        self.update_output_path_display()
-
     def update_output_path_display(self):
         """更新输出路径显示"""
         current_working_dir = os.getcwd()
@@ -1096,6 +1232,7 @@ class PythonPackager(QMainWindow):
             self.output_dir = directory
             self.main_log.append_log(f"输出目录设置为: {directory}", "INFO")
             self.update_output_path_display()
+            self.save_config()  # 保存配置
 
     def set_default_output_path(self):
         """设置为当前代码执行的地方"""
@@ -1118,29 +1255,22 @@ class PythonPackager(QMainWindow):
                     # 加载新配置项
                     self.open_folder_after_completion = config.get("open_folder_after_completion", False)
 
-                    # 更新下拉框
-                    self.python_combo.clear()
-                    self.python_combo.addItems(self.python_paths)
-
-                    # 设置上次选择的路径
-                    if 0 <= self.last_selected_index < len(self.python_paths):
-                        self.python_combo.setCurrentIndex(self.last_selected_index)
+                    # 更新下拉框（只显示可用路径）
+                    self.update_python_combo()
 
                     # 更新复选框状态
-                    if hasattr(self, 'open_folder_checkbox'):
-                        self.open_folder_checkbox.setChecked(self.open_folder_after_completion)
+                    self.open_folder_checkbox.setChecked(self.open_folder_after_completion)
 
             self.main_log.append_log("配置加载完成", "INFO")
             self.update_output_path_display()
         except Exception as e:
             self.main_log.append_log(f"加载配置文件失败: {str(e)}", "ERROR")
 
-    # 更新 save_config 方法
     def save_config(self):
         """保存配置文件"""
         try:
             config = {
-                "python_paths": self.python_paths,
+                "python_paths": self.python_paths,  # 保存所有路径，不仅仅是可用的
                 "last_selected_index": self.python_combo.currentIndex(),
                 "output_dir": self.output_dir,
                 "open_folder_after_completion": self.open_folder_after_completion  # 保存新配置项
@@ -1154,11 +1284,31 @@ class PythonPackager(QMainWindow):
         """显示Python路径配置对话框"""
         dialog = PythonPathDialog(self.python_paths, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.python_paths = dialog.get_paths()
-            self.python_combo.clear()
-            self.python_combo.addItems(self.python_paths)
-            self.save_config()
-            self.main_log.append_log("Python路径配置已更新", "INFO")
+            new_paths = dialog.get_paths()
+            if new_paths != self.python_paths:  # 只有在路径有变化时才更新
+                self.python_paths = new_paths
+                self.update_python_combo()  # 使用新方法更新下拉框
+                self.save_config()
+                self.main_log.append_log("Python路径配置已更新", "INFO")
+
+    def update_python_combo(self):
+        """更新Python路径下拉框，只显示可用的路径"""
+        self.python_combo.clear()
+        available_paths = []
+
+        # 检查每个路径是否可用
+        for path in self.python_paths:
+            # 创建临时的PythonPathDialog实例来检查路径状态
+            temp_dialog = PythonPathDialog([], self)
+            status_text, is_valid = temp_dialog.get_python_path_status(path)
+            if is_valid:  # 只添加可用的路径
+                available_paths.append(path)
+
+        self.python_combo.addItems(available_paths)
+
+        # 设置上次选择的路径（如果仍然可用）
+        if 0 <= self.last_selected_index < len(available_paths):
+            self.python_combo.setCurrentIndex(self.last_selected_index)
 
     def browse_folder(self):
         """浏览并添加文件夹"""
@@ -1227,14 +1377,12 @@ class PythonPackager(QMainWindow):
             self.log_tabs.setCurrentWidget(log_widget)
 
             # 启动加密线程时传递重命名选项
-            rename_enabled = self.rename_checkbox.isChecked() if hasattr(self, 'rename_checkbox') else True
+            rename_enabled = self.rename_checkbox.isChecked()  # 简化检查
             self.encrypt_thread = EncryptThread(python_path, file_paths, self.output_dir, rename_enabled)
             self.encrypt_thread.log_signal.connect(log_widget.append_log)
             self.encrypt_thread.log_signal.connect(self.main_log.append_log)
             self.encrypt_thread.progress_signal.connect(self.progress_widget.update_progress)
             self.encrypt_thread.finished_signal.connect(self.on_encrypt_finished)
-
-
 
             self.update_task_status(True)
             self.encrypt_thread.start()
@@ -1311,7 +1459,7 @@ if __name__ == "__main__":
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
-    app.setApplicationName("Python代码打包工具")
+    app.setApplicationName("Python代码加密工具")
     app.setApplicationVersion("2.0.0")
 
     # 设置应用程序字体
